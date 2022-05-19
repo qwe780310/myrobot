@@ -144,7 +144,10 @@ func repair(channelID string, messageID string) error {
 	return nil
 }
 
+var flag2 = true
+
 func updateMap(botMessage string, channelID string, messageID string) error {
+	flag2 = true
 	if flag {
 		flag = false
 		currentDay := time.Now().Day()
@@ -166,15 +169,23 @@ func updateMap(botMessage string, channelID string, messageID string) error {
 		}
 		content := "请勿重复打卡"
 		// 检查是否已经打卡
-		if _, ok := recodeTable[int(day)]; !ok {
-			recodeTable = p[userID]
-			recodeTable[int(day)] = 1
+
+		if recodeTable, ok := p[userID]; ok {
+			if _, ok := recodeTable[int(day)]; !ok {
+				recodeTable[int(day)] = 1
+				content = "补卡成功"
+			}
+		} else {
+			m := make(map[int]int)
+			m[int(day)] = 1
 			content = "补卡成功"
-			return nil
+			p[userID] = m
 		}
+
 		_, err = api.PostMessage(ctx, channelID, &dto.MessageToCreate{
 			MsgID: messageID, Content: content,
 		})
+		flag2 = false
 		if err != nil {
 			return err
 		}
@@ -182,23 +193,6 @@ func updateMap(botMessage string, channelID string, messageID string) error {
 	}
 	return nil
 }
-
-//func (o *openAPI) PostMessage(ctx context.Context, channelID string, msg *dto.MessageToCreate) (*dto.Message, error) {
-//	resp, err := o.request(ctx).
-//		SetResult(dto.Message{}).
-//		SetPathParam("channel_id", channelID).
-//		SetBody(msg).
-//		Post(o.getURL(messagesURI))
-//	if err != nil {
-//		return nil, err
-//	}
-//
-//	return resp.Result().(*dto.Message), nil
-//}
-//
-//func (o *openAPI) request(ctx context.Context) *resty.Request {
-//	return o.restyClient.R().SetContext(ctx)
-//}
 
 //atMessageEventHandler 处理 @机器人 的消息
 func atMessageEventHandler(event *dto.WSPayload, data *dto.WSATMessageData) error {
@@ -241,6 +235,9 @@ func atMessageEventHandler(event *dto.WSPayload, data *dto.WSATMessageData) erro
 	err := updateMap(botMessage, data.ChannelID, data.ID)
 	if err != nil {
 		return err
+	}
+	if !flag2 {
+		return nil
 	}
 
 	// 如果指令都未被捕获，则说明输入指令有问题
