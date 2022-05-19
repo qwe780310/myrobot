@@ -14,6 +14,7 @@ import (
 	"gopkg.in/yaml.v2"
 	"io/ioutil"
 	"log"
+
 	"os"
 	"strconv"
 	"strings"
@@ -25,8 +26,11 @@ var api openapi.OpenAPI
 var ctx context.Context
 var channelId = "" // 保存子频道的id
 var recodeTable = make(map[int]int)
+var p = make(map[string]map[int]int)
 var flag bool
 var guildID string
+var userID string
+var userIDList []string
 
 //Config 定义了配置文件的结构
 type Config struct {
@@ -55,10 +59,19 @@ func punch(channelID string, messageID string) error {
 	content := "请勿重复打卡"
 	// 检查是否已经打卡
 	// 通配符，任意变量名称
-	if _, ok := recodeTable[day]; !ok {
-		recodeTable[day] = 1
+	if recodeTable, ok := p[userID]; ok {
+		if _, ok := recodeTable[day]; !ok {
+			recodeTable[day] = 1
+			content = "打卡成功"
+		}
+		p[userID] = recodeTable
+	} else {
+		m := make(map[int]int)
+		m[day] = 1
 		content = "打卡成功"
+		p[userID] = m
 	}
+
 	_, err := api.PostMessage(ctx, channelID, &dto.MessageToCreate{
 		MsgID: messageID, Content: content,
 	})
@@ -73,6 +86,7 @@ func queryList(channelID string, messageID string) error {
 	day := time.Now().Day()
 	for i := 1; i <= day; i++ {
 		recoded := "已打卡"
+		recodeTable = p[userID]
 		if _, ok := recodeTable[i]; !ok {
 			recoded = "未打卡"
 		}
@@ -100,6 +114,7 @@ func repair(channelID string, messageID string) error {
 
 	for i := 1; i <= 7 && currentDay > 0; i++ {
 		recoded := "已打卡"
+		recodeTable = p[userID]
 		if _, ok := recodeTable[currentDay]; !ok {
 			recoded = "未打卡"
 		}
@@ -152,8 +167,10 @@ func updateMap(botMessage string, channelID string, messageID string) error {
 		content := "请勿重复打卡"
 		// 检查是否已经打卡
 		if _, ok := recodeTable[int(day)]; !ok {
+			recodeTable = p[userID]
 			recodeTable[int(day)] = 1
 			content = "补卡成功"
+			return nil
 		}
 		_, err = api.PostMessage(ctx, channelID, &dto.MessageToCreate{
 			MsgID: messageID, Content: content,
@@ -185,14 +202,18 @@ func updateMap(botMessage string, channelID string, messageID string) error {
 
 //atMessageEventHandler 处理 @机器人 的消息
 func atMessageEventHandler(event *dto.WSPayload, data *dto.WSATMessageData) error {
+
 	channelId = data.ChannelID //当@机器人时，保存ChannelId，主动消息需要channelId才能发送出去
+	userID = data.Author.ID
 	botMessage := data.Content
 	guildID = data.GuildID
+
 	log.Println("botMessage" + botMessage)
 	res := message.ParseCommand(botMessage) // 去掉@结构和清除前后空格
 	log.Println("cmd = " + res.Cmd + " content = " + res.Content)
 
-	if strings.HasSuffix(botMessage, "打卡 ") {
+	botMessage = strings.TrimRight(botMessage, " ")
+	if strings.HasSuffix(botMessage, "打卡") {
 		err := punch(data.ChannelID, data.ID)
 		if err != nil {
 			return err
@@ -200,7 +221,7 @@ func atMessageEventHandler(event *dto.WSPayload, data *dto.WSATMessageData) erro
 		return nil
 	}
 
-	if strings.HasSuffix(botMessage, "查询打卡信息 ") {
+	if strings.HasSuffix(botMessage, "查询打卡信息") {
 		err := queryList(data.ChannelID, data.ID)
 		if err != nil {
 			return err
@@ -208,7 +229,7 @@ func atMessageEventHandler(event *dto.WSPayload, data *dto.WSATMessageData) erro
 		return nil
 	}
 
-	if strings.HasSuffix(botMessage, "补卡 ") {
+	if strings.HasSuffix(botMessage, "补卡") {
 		err := repair(data.ChannelID, data.ID)
 		if err != nil {
 			return err
@@ -222,7 +243,24 @@ func atMessageEventHandler(event *dto.WSPayload, data *dto.WSATMessageData) erro
 		return err
 	}
 
+	// 如果指令都未被捕获，则说明输入指令有问题
+	err = tryException(data.ChannelID, data.ID)
+	if err != nil {
+		return err
+	}
+
 	println(fmt.Sprintf("打卡信息：%#v", recodeTable))
+
+	return nil
+}
+
+func tryException(channelID string, messageID string) error {
+	_, err := api.PostMessage(ctx, channelID, &dto.MessageToCreate{
+		MsgID: messageID, Content: "指令输入非法，请重新输入指令！",
+	})
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -239,9 +277,19 @@ func registerMsgPush() {
 		}
 	}
 	var activeMsgPush2 = func() {
-		if channelId != "" && (recodeTable[currentDay] == 0) {
-			//MsgID 为空字符串表示主动消息
-			api.PostMessage(ctx, channelId, &dto.MessageToCreate{MsgID: "", Content: "您今天未打卡！"})
+		userMap := getUserList()
+		fmt.Println(fmt.Sprintf("%v", userMap))
+		recodeTable = p[userID]
+		content := "未打卡名单：\n"
+		for _, member := range userMap {
+			recodeTable = p[member.User.ID]
+			if channelId != "" && (recodeTable[currentDay] == 0 && !member.User.Bot) {
+				content += member.User.Username + "\n"
+			}
+		}
+		_, err := api.PostMessage(ctx, channelId, &dto.MessageToCreate{MsgID: "", Content: content})
+		if err != nil {
+			log.Println(err)
 		}
 	}
 	timer := cron.New()
@@ -251,11 +299,25 @@ func registerMsgPush() {
 	if err != nil {
 		return
 	}
-	err = timer.AddFunc("0 0 20 * * ?", activeMsgPush2)
+	err = timer.AddFunc("0 21 23 * * ?", activeMsgPush2)
 	if err != nil {
 		return
 	}
 	timer.Start()
+}
+
+func getUserList() map[string]*dto.Member {
+	userMap := make(map[string]*dto.Member)
+	pager := &dto.GuildMembersPager{Limit: "500"}
+	members, err := api.GuildMembers(ctx, guildID, pager)
+	if err != nil {
+		log.Println(err)
+	}
+	for _, member := range members {
+		userMap[member.User.ID] = member
+		//append(userMap, member.User.Username)
+	}
+	return userMap
 }
 
 func main() {
