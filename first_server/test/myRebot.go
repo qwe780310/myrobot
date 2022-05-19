@@ -296,7 +296,7 @@ func registerMsgPush() {
 	if err != nil {
 		return
 	}
-	err = timer.AddFunc("0 21 23 * * ?", activeMsgPush2)
+	err = timer.AddFunc("0 0 20 * * ?", activeMsgPush2)
 	if err != nil {
 		return
 	}
